@@ -1,0 +1,11 @@
+# 依赖目录
+node_modules/
+
+# 缓存目录
+cache/
+
+# IDE/编辑器配置
+.vscode/
+
+ai-rules-script.js
+my_own_config.yaml

@@ -1,0 +1,18 @@
+# 修改脚本路径
+scriptPath: ./ai-rules-script.js
+# 服务端口
+port: 3000
+# 是否使用缓存
+useCache: true
+# HTTPS配置
+https:
+  # 是否启用HTTPS
+  enabled: false
+  # 是否强制使用HTTPS（当同时启用HTTP和HTTPS时，将HTTP请求重定向到HTTPS）
+  forceHttps: false
+  # HTTPS端口，默认为443
+  port: 443
+  # SSL证书路径
+  certPath: ./cert/server.crt
+  # SSL私钥路径
+  keyPath: ./cert/server.key
