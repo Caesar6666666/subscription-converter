@@ -11,6 +11,7 @@
 - 通过Web界面提供RESTful API
 - 支持安装为systemd系统服务
 - 支持HTTPS安全访问，可配置强制HTTPS
+- 支持传递Clash订阅响应头，如订阅流量信息、更新间隔等
 
 ## 安装与运行
 
@@ -224,6 +225,45 @@ function main(config, profileName) {
 - 当下载失败且`useCache`为`true`时，会使用缓存内容
 - 可以通过`noCache=1`请求参数强制忽略缓存
 - 缓存文件保存在`cache`目录中
+
+## Clash订阅响应头支持
+
+本服务支持透传原始订阅链接的以下Clash特有响应头，方便Clash客户端使用：
+
+### 支持的响应头
+
+1. **content-disposition**
+   - 设置配置文件名
+   - 示例：`content-disposition: attachment; filename="my-config.yaml"`
+   - 支持UTF-8编码的中文文件名
+
+2. **profile-update-interval**
+   - 设置配置更新间隔（单位：小时）
+   - 示例：`profile-update-interval: 24`
+
+3. **subscription-userinfo**
+   - 显示流量使用情况和到期时间
+   - 示例：`subscription-userinfo: upload=1234; download=2234; total=1024000; expire=2218532293`
+
+4. **profile-web-page-url**
+   - 提供订阅的Web页面链接
+   - 示例：`profile-web-page-url: https://example.com`
+
+### 工作原理
+
+- 当检测到请求的User-Agent中包含"clash"字样时，服务会自动传递这些响应头
+- 订阅响应头也会随内容一起缓存，在使用缓存时同样会传递
+- 使用Clash订阅链接时，我们会自动使用包含"clash"字样的User-Agent请求原始链接
+
+### 使用方法
+
+使用Clash客户端（如Clash Verge）添加订阅时，使用本服务的转换链接即可：
+
+```
+http://your-server:3000/convert?url=原始订阅链接&name=配置名称
+```
+
+客户端将自动接收并处理这些响应头，显示相应的流量信息、更新频率等。
 
 ## 注意事项
 

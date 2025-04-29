@@ -142,12 +142,13 @@ app.use((req, res, next) => {
  * 下载订阅内容
  * @param {string} url 订阅URL
  * @param {boolean} useCache 是否使用缓存
- * @returns {Promise<string>} 订阅内容
+ * @returns {Promise<{content: any, headers: Object}>} 订阅内容和响应头
  */
 async function downloadSubscription(url, useCache = true) {
   // 为URL创建唯一标识符作为缓存文件名 - 使用MD5哈希
   const cacheKey = crypto.createHash('md5').update(url).digest('hex');
   const cachePath = path.join(CACHE_DIR, `${cacheKey}.cache`);
+  const headersCachePath = path.join(CACHE_DIR, `${cacheKey}.headers.json`);
   
   try {
     // 尝试下载订阅内容
@@ -155,17 +156,24 @@ async function downloadSubscription(url, useCache = true) {
     const response = await axios.get(url, {
       timeout: 15000,
       headers: {
-        'User-Agent': 'ClashSubscriptionConverter/1.0'
-      }
+        'User-Agent': 'ClashSubscriptionConverter/1.0 (Clash)',
+      },
+      // 启用完整的响应对象以获取响应头
+      validateStatus: status => status < 400
     });
     
     const content = response.data;
+    const responseHeaders = response.headers;
     
     // 将内容保存到缓存
     fs.writeFileSync(cachePath, typeof content === 'string' ? content : JSON.stringify(content), 'utf8');
-    console.log(`订阅下载成功，已缓存: ${url}`);
+    // 将响应头保存到缓存
+    fs.writeFileSync(headersCachePath, JSON.stringify(responseHeaders), 'utf8');
     
-    return content;
+    console.log(`订阅下载成功，已缓存: ${url}`);
+    console.log(`响应头已缓存: ${JSON.stringify(responseHeaders)}`);
+    
+    return { content, headers: responseHeaders };
   } catch (error) {
     console.error(`下载订阅失败 ${url}: ${error.message}`);
     
@@ -173,8 +181,22 @@ async function downloadSubscription(url, useCache = true) {
     if (useCache && fs.existsSync(cachePath)) {
       console.log(`使用缓存内容: ${url}`);
       const cachedContent = fs.readFileSync(cachePath, 'utf8');
+      let headers = {};
+      
+      // 尝试读取缓存的响应头
+      if (fs.existsSync(headersCachePath)) {
+        try {
+          headers = JSON.parse(fs.readFileSync(headersCachePath, 'utf8'));
+        } catch (headersError) {
+          console.error(`解析缓存的响应头失败: ${headersError.message}`);
+        }
+      }
+      
       try {
-        return typeof cachedContent === 'string' ? cachedContent : JSON.parse(cachedContent);
+        const content = typeof cachedContent === 'string' 
+          ? (cachedContent.trim().startsWith('{') ? JSON.parse(cachedContent) : cachedContent) 
+          : cachedContent;
+        return { content, headers };
       } catch (parseError) {
         console.error(`解析缓存内容失败: ${parseError.message}`);
         throw new Error(`下载订阅失败且缓存内容无效: ${url}`);
@@ -191,9 +213,10 @@ async function downloadSubscription(url, useCache = true) {
  * @param {string} profileName 配置文件名称
  * @param {string} scriptPath 修改脚本路径
  * @param {boolean} useCache 是否使用缓存
- * @returns {Promise<string>} 处理后的配置文件路径
+ * @param {Object} requestHeaders 请求头，用于检测客户端
+ * @returns {Promise<{filePath: string, fileName: string, headers: Object}>} 处理后的配置文件路径、文件名和响应头
  */
-async function processSubscription(subscriptionUrl, profileName, scriptPath, useCache) {
+async function processSubscription(subscriptionUrl, profileName, scriptPath, useCache, requestHeaders) {
   // 为配置文件生成唯一名称
   const configFileName = `clash_${profileName || 'config'}_${Date.now()}.yaml`;
   const tempFilePath = path.join(OS_TEMP_DIR, configFileName);
@@ -201,7 +224,7 @@ async function processSubscription(subscriptionUrl, profileName, scriptPath, use
   console.log(`处理订阅: ${subscriptionUrl}, 名称: ${profileName || '未指定'}`);
   
   // 下载订阅内容
-  const subscriptionContent = await downloadSubscription(subscriptionUrl, useCache);
+  const { content: subscriptionContent, headers: responseHeaders } = await downloadSubscription(subscriptionUrl, useCache);
   
   // 将订阅内容解析为对象
   let config;
@@ -245,7 +268,15 @@ async function processSubscription(subscriptionUrl, profileName, scriptPath, use
     throw new Error(`写入配置文件失败: ${error.message}`);
   }
   
-  return tempFilePath;
+  // 确定文件名
+  let fileName = profileName ? `${profileName}.yaml` : 'config.yaml';
+  
+  // 返回处理结果
+  return { 
+    filePath: tempFilePath, 
+    fileName, 
+    headers: responseHeaders 
+  };
 }
 
 // 主页路由 - 提供使用说明和API文档
@@ -376,19 +407,54 @@ app.get('/convert', async (req, res) => {
     
     // 处理订阅
     const useCache = !noCache && config.useCache;
-    tempFilePath = await processSubscription(
+    const result = await processSubscription(
       subscriptionUrl, 
       profileName, 
       config.scriptPath,
-      useCache
+      useCache,
+      req.headers
     );
     
-    // 发送文件
-    const fileName = profileName ? `${profileName}.yaml` : 'config.yaml';
+    tempFilePath = result.filePath;
+    const fileName = result.fileName;
+    const originalHeaders = result.headers;
     
-    // 自定义发送文件，避免文件名引号问题
+    // 检查客户端是否是Clash（User-Agent中包含"clash"）
+    const isClashClient = req.headers['user-agent'] && 
+                          req.headers['user-agent'].toLowerCase().includes('clash');
+    
+    // 如果是Clash客户端，传递原始订阅的特定响应头
+    if (isClashClient) {
+      // 处理content-disposition响应头
+      if (originalHeaders['content-disposition']) {
+        res.setHeader('Content-Disposition', originalHeaders['content-disposition']);
+      } else {
+        res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(fileName)}`);
+      }
+      
+      // 传递profile-update-interval响应头（更新间隔）
+      if (originalHeaders['profile-update-interval']) {
+        res.setHeader('Profile-Update-Interval', originalHeaders['profile-update-interval']);
+      }
+      
+      // 传递subscription-userinfo响应头（流量信息）
+      if (originalHeaders['subscription-userinfo']) {
+        res.setHeader('Subscription-Userinfo', originalHeaders['subscription-userinfo']);
+      }
+      
+      // 传递profile-web-page-url响应头（订阅首页链接）
+      if (originalHeaders['profile-web-page-url']) {
+        res.setHeader('Profile-Web-Page-Url', originalHeaders['profile-web-page-url']);
+      }
+      
+      console.log('检测到Clash客户端，传递原始订阅的响应头');
+    } else {
+      // 自定义发送文件，避免文件名引号问题
+      res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(fileName)}`);
+    }
+    
+    // 设置通用响应头
     res.setHeader('Content-Type', 'application/x-yaml');
-    res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(fileName)}`);
     
     // 使用管道发送文件并在完成后删除临时文件
     const fileStream = fs.createReadStream(tempFilePath);
@@ -444,19 +510,54 @@ app.post('/convert', async (req, res) => {
     
     // 处理订阅
     const useCache = !noCache && config.useCache;
-    tempFilePath = await processSubscription(
+    const result = await processSubscription(
       subscriptionUrl, 
       profileName || '', 
       config.scriptPath,
-      useCache
+      useCache,
+      req.headers
     );
     
-    // 发送文件
-    const fileName = profileName ? `${profileName}.yaml` : 'config.yaml';
+    tempFilePath = result.filePath;
+    const fileName = result.fileName;
+    const originalHeaders = result.headers;
     
-    // 自定义发送文件，避免文件名引号问题
+    // 检查客户端是否是Clash（User-Agent中包含"clash"）
+    const isClashClient = req.headers['user-agent'] && 
+                          req.headers['user-agent'].toLowerCase().includes('clash');
+    
+    // 如果是Clash客户端，传递原始订阅的特定响应头
+    if (isClashClient) {
+      // 处理content-disposition响应头
+      if (originalHeaders['content-disposition']) {
+        res.setHeader('Content-Disposition', originalHeaders['content-disposition']);
+      } else {
+        res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(fileName)}`);
+      }
+      
+      // 传递profile-update-interval响应头（更新间隔）
+      if (originalHeaders['profile-update-interval']) {
+        res.setHeader('Profile-Update-Interval', originalHeaders['profile-update-interval']);
+      }
+      
+      // 传递subscription-userinfo响应头（流量信息）
+      if (originalHeaders['subscription-userinfo']) {
+        res.setHeader('Subscription-Userinfo', originalHeaders['subscription-userinfo']);
+      }
+      
+      // 传递profile-web-page-url响应头（订阅首页链接）
+      if (originalHeaders['profile-web-page-url']) {
+        res.setHeader('Profile-Web-Page-Url', originalHeaders['profile-web-page-url']);
+      }
+      
+      console.log('检测到Clash客户端，传递原始订阅的响应头');
+    } else {
+      // 自定义发送文件，避免文件名引号问题
+      res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(fileName)}`);
+    }
+    
+    // 设置通用响应头
     res.setHeader('Content-Type', 'application/x-yaml');
-    res.setHeader('Content-Disposition', `attachment; filename=${encodeURIComponent(fileName)}`);
     
     // 使用管道发送文件并在完成后删除临时文件
     const fileStream = fs.createReadStream(tempFilePath);
